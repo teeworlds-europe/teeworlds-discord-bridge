@@ -65,7 +65,7 @@ class TeeworldsDiscordBridge(discord.Client):
                     server['econ_port'],
                 )
                 writer.write(f'{server["econ_password"]}\n'.encode('utf-8'))
-                content = message.content[:100]
+                content = message.clean_content[:100]
                 content.replace('\n', ' ')
                 author = message.author.name[:30]
                 author.replace('\n', ' ')
