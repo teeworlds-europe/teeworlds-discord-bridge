@@ -14,3 +14,4 @@ Inspired by [teeworlds-discord-bot](https://github.com/pure-luck-999/teeworlds-d
 ## Bugs
 
 - Script doesn't terminate properly. It needs to be shutted down with SIGKILL.
+- Some Discord emoticons aren't rendered properly in Teeworlds client.
