@@ -148,13 +148,13 @@ class TeeworldsDiscordBridge(discord.Client):
                 )
                 continue
             match = re.match(JOIN_PATTERN, line)
-            if match:
+            if match and settings.get('show_joins') is True:
                 name = match.group(1)
                 await self.get_channel(channel_id).send(
                     f'[game] {name} joined the game'
                 )
             match = re.match(LEAVE_PATTERN, line)
-            if match:
+            if match and settings.get('show_leaves') is True:
                 name = match.group(1).split(':')[1:]
                 await self.get_channel(channel_id).send(
                     f'[game] {name} left the game'
