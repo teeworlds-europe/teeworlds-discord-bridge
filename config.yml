@@ -1,11 +1,9 @@
 ---
-discord_token: 'token'
+discord_token: token
 discord_servers:
-  server_id_integer:
+  server_id:
     teeworlds_servers:
-      'Public CTF':
-        unix_socket: test.sock
-        channel_id: channel_id_integer
-        econ_address: 127.0.0.1
+      channel_id:
+        econ_host: 127.0.0.1
         econ_port: 8403
         econ_password: password

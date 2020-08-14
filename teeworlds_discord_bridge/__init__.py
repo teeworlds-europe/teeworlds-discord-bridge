@@ -1,79 +1,136 @@
 import re
+import sys
 from argparse import ArgumentParser
-from asyncio import open_unix_connection, sleep, open_connection
+from asyncio import (
+    sleep,
+    open_connection,
+    Event,
+)
 
 import discord
 from ruamel import yaml
 
 
-CHAT_PATTERN = re.compile(r'^\[\S+ \S+\]\[chat\]: (\d+:\d+:.+?): (.*)$')
+CHAT_PATTERN = re.compile(r'^\[\S+\]\[chat\]: (\d+:\d+:.+?): (.*)$')
+
+
+class TeeworldsECON:
+
+    def __init__(self, host, port, password):
+        self.host = host
+        self.port = port
+        self.password = password
+        self.reader = None
+        self.writer = None
+        self.connected = Event()
+        self.waiting = Event()
+        self.waiting.set()
+
+    async def connect(self):
+        while True:
+            if self.writer is not None:
+                self.writer.close()
+                await self.writer.wait_closed()
+                self.writer = None
+                self.reader = None
+            try:
+                self.reader, self.writer = await open_connection(
+                    self.host, self.port,
+                )
+                print(f'Connected to {self.host}:{self.port}')
+                self.writer.write(f'{self.password}\n'.encode())
+                await self.writer.drain()
+                # Skip password prompt
+                await self.reader.readline()
+                line = await self.reader.readline()
+                if not 'Authentication successful' \
+                        in line.decode('utf-8'):
+                    print(f'Failed to authenticate to {self.host}:{self.port}')
+                    await sleep(10)
+                    continue
+                break
+            except Exception as e:
+                print(f'Failed to connect to {self.host}:{self.port}: {e!s}')
+                await sleep(5)
+        self.connected.set()
+
+    async def say(self, message):
+        await self.connected.wait()
+        await self.waiting.wait()
+        self.waiting.clear()
+        message = message[:120]
+        # Prevent command injection
+        message.replace('\n', ' ')
+        try:
+            self.writer.write(f'say {message}\n'.encode())
+            await self.writer.drain()
+        except Exception as e:
+            print(f'Failed to send command to {self.host}:{self.port}')
+            self.connected.clear()
+            await self.connect()
+        finally:
+            self.waiting.set()
+
+    async def readline(self):
+        # It's not safe to call this method, before previous call returns
+        await self.connected.wait()
+        while True:
+            try:
+                return (await self.reader.readline()).decode('utf-8')\
+                    .replace('\0', '').rstrip()
+            except Exception as e:
+                print(f'Failed to read line from {self.host}:{self.port}')
+                self.connected.clear()
+                await self.connect()
 
 
 class TeeworldsDiscordBridge(discord.Client):
 
     def __init__(self, config, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.__config = config
-        for discord_name, discord_server in config['discord_servers'].items():
-            for tw_name, tw_server \
+        self.config = config
+        self.connections = {}
+        for server_id, discord_server in self.config['discord_servers'].items():
+            for channel_id, settings \
                     in discord_server['teeworlds_servers'].items():
                 self.loop.create_task(
-                    self.watch_log(discord_name, tw_name, tw_server)
+                    self.watch_econ(server_id, channel_id, settings)
                 )
 
     async def on_ready(self):
         print(f'Logged in successfully as {self.user}')
 
-    async def connect_to_log(self, path):
-        reader = None
-        while reader is None:
-            try:
-                reader, _ = await open_unix_connection(path)
-            except:
-                print(f'Failed to connect to log: {path}')
-                await sleep(5)
-        print(f'Connected to log: {path}')
-        return reader
-
-    async def watch_log(self, discord_server, tw_server, settings):
+    async def watch_econ(self, server_id, channel_id, settings):
         await self.wait_until_ready()
-        reader = await self.connect_to_log(settings['unix_socket'])
-        channel = self.get_channel(settings['channel_id'])
-        while not self.is_closed():
-            line = (await reader.readline()).decode('utf-8').rstrip()
-            if not line:
-                reader.close()
-                await reader.wait_closed()
-                reader = await self.connect_to_log(settings['unix_socket'])
+        econ = TeeworldsECON(
+            settings['econ_host'],
+            settings['econ_port'],
+            settings['econ_password'],
+        )
+        self.connections[(server_id, channel_id)] = econ
+        await econ.connect()
+        while True:
+            line = await econ.readline()
             match = re.match(CHAT_PATTERN, line)
             if not match:
                 continue
-            await channel.send(
-                f'{tw_server}: {match.group(1)}: {match.group(2)}'
+            name = match.group(1)
+            message = match.group(2)
+            await self.get_channel(channel_id).send(
+                f'Teeworlds chat: {name}: {message}'
             )
 
     async def on_message(self, message):
-        settings = self.__config['discord_servers'].get(
-            message.channel.guild.id
-        )
+        server_id = message.channel.guild.id
+        settings = self.config['discord_servers'].get(server_id)
         if settings is None or self.user.id == message.author.id:
             return
-        for server in settings['teeworlds_servers'].values():
-            if message.channel.id == server['channel_id']:
-                _, writer = await open_connection(
-                    server['econ_address'],
-                    server['econ_port'],
+        for channel_id, server in settings['teeworlds_servers'].items():
+            if message.channel.id == channel_id:
+                await self.connections[(server_id, channel_id)].say(
+                    f'Discord: {message.author.name}: {message.clean_content}'
                 )
-                writer.write(f'{server["econ_password"]}\n'.encode('utf-8'))
-                content = message.clean_content[:100]
-                content.replace('\n', ' ')
-                author = message.author.name[:30]
-                author.replace('\n', ' ')
-                writer.write(
-                    f'say Discord: {author}: {content}\n'.encode('utf-8')
-                )
-                await writer.drain()
-                writer.close()
+                break
 
 
 def main():
