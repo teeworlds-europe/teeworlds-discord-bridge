@@ -185,3 +185,7 @@ def main():
         config = yaml.safe_load(f)
     client = TeeworldsDiscordBridge(config)
     client.run(config['discord_token'])
+
+
+if __name__ == '__main__':
+    main()
