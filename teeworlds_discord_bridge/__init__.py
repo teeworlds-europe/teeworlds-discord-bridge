@@ -117,7 +117,7 @@ class TeeworldsDiscordBridge(discord.Client):
             name = match.group(1)
             message = match.group(2)
             await self.get_channel(channel_id).send(
-                f'Teeworlds chat: {name}: {message}'
+                f'{name}: {message}'
             )
 
     async def on_message(self, message):
