@@ -142,6 +142,8 @@ class TeeworldsDiscordBridge(discord.Client):
             match = re.match(CHAT_PATTERN, line)
             if match:
                 name = match.group(1)
+                if name in settings.get('blacklist', []):
+                    continue
                 message = match.group(2)
                 await self.get_channel(channel_id).send(
                     f'[chat] {name}: {message}'
