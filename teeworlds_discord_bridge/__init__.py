@@ -11,7 +11,7 @@ import discord
 from ruamel import yaml
 
 
-CHAT_PATTERN = re.compile(r'^\[\S+\]\[chat\]: (\d+:\d+:.+?): (.*)$')
+CHAT_PATTERN = re.compile(r'^\[\S+\]\[chat\]: \d+:\d+:(.+?): (.*)$')
 
 
 class TeeworldsECON:
@@ -117,7 +117,7 @@ class TeeworldsDiscordBridge(discord.Client):
             name = match.group(1)
             message = match.group(2)
             await self.get_channel(channel_id).send(
-                f'{name}: {message}'
+                f'[chat] {name}: {message}'
             )
 
     async def on_message(self, message):
