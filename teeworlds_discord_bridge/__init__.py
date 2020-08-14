@@ -1,17 +1,40 @@
 import re
-import sys
+import functools
 from argparse import ArgumentParser
 from asyncio import (
     sleep,
     open_connection,
-    Event,
+    Lock,
 )
 
 import discord
 from ruamel import yaml
 
 
-CHAT_PATTERN = re.compile(r'^\[\S+\]\[chat\]: \d+:\d+:(.+?): (.*)$')
+CHAT_PATTERN = re.compile(
+    r'^\[\S+\]\[chat\]: \d+:\d+:(.+?): (.*)$'
+)
+JOIN_PATTERN = re.compile(
+    r'^\[\S+\]\[game\]: team_join player=\'(.+?)\''
+)
+LEAVE_PATTERN = re.compile(
+    r'^\[\S+\]\[game\]: leave player=\'(.+?)\''
+)
+
+
+def acquire(*modes):
+    def outer(f):
+        @functools.wraps(f)
+        async def inner(self, *args, **kwargs):
+            for mode in modes:
+                await getattr(self, f'{mode}_lock').acquire()
+            try:
+                return await f(self, *args, **kwargs)
+            finally:
+                for mode in modes:
+                    getattr(self, f'{mode}_lock').release()
+        return inner
+    return outer
 
 
 class TeeworldsECON:
@@ -22,66 +45,62 @@ class TeeworldsECON:
         self.password = password
         self.reader = None
         self.writer = None
-        self.connected = Event()
-        self.waiting = Event()
-        self.waiting.set()
+        self.read_lock = Lock()
+        self.write_lock = Lock()
 
+    @acquire('write', 'read')
     async def connect(self):
-        while True:
-            if self.writer is not None:
-                self.writer.close()
-                await self.writer.wait_closed()
-                self.writer = None
-                self.reader = None
-            try:
-                self.reader, self.writer = await open_connection(
-                    self.host, self.port,
+        if self.writer is not None:
+            self.writer.close()
+            await self.writer.wait_closed()
+        try:
+            self.reader, self.writer = await open_connection(
+                self.host, self.port,
+            )
+            print(f'Connected to {self.host}:{self.port}')
+            self.writer.write(f'{self.password}\n'.encode())
+            await self.writer.drain()
+            # Skip password prompt
+            await self.reader.readline()
+            line = await self.reader.readline()
+            if 'Authentication successful' \
+                    not in line.decode('utf-8'):
+                raise Exception(
+                    f'Failed to authenticate to {self.host}:{self.port}'
                 )
-                print(f'Connected to {self.host}:{self.port}')
-                self.writer.write(f'{self.password}\n'.encode())
-                await self.writer.drain()
-                # Skip password prompt
-                await self.reader.readline()
-                line = await self.reader.readline()
-                if not 'Authentication successful' \
-                        in line.decode('utf-8'):
-                    print(f'Failed to authenticate to {self.host}:{self.port}')
-                    await sleep(10)
-                    continue
-                break
-            except Exception as e:
-                print(f'Failed to connect to {self.host}:{self.port}: {e!s}')
-                await sleep(5)
-        self.connected.set()
+        except Exception as e:
+            print(f'Failed to connect to {self.host}:{self.port}')
+            raise e
 
+    async def disconnect(self):
+        if self.writer is not None:
+            self.writer.close()
+            return await self.writer.wait_closed()
+
+    def is_closing(self):
+        if self.writer is None:
+            return True
+        else:
+            return self.writer.is_closing()
+
+    @acquire('write')
     async def say(self, message):
-        await self.connected.wait()
-        await self.waiting.wait()
-        self.waiting.clear()
         message = message[:120]
         # Prevent command injection
         message.replace('\n', ' ')
-        try:
-            self.writer.write(f'say {message}\n'.encode())
-            await self.writer.drain()
-        except Exception as e:
-            print(f'Failed to send command to {self.host}:{self.port}')
-            self.connected.clear()
-            await self.connect()
-        finally:
-            self.waiting.set()
+        self.writer.write(f'say {message}\n'.encode())
+        await self.writer.drain()
 
+    @acquire('read')
     async def readline(self):
-        # It's not safe to call this method, before previous call returns
-        await self.connected.wait()
-        while True:
-            try:
-                return (await self.reader.readline()).decode('utf-8')\
-                    .replace('\0', '').rstrip()
-            except Exception as e:
-                print(f'Failed to read line from {self.host}:{self.port}')
-                self.connected.clear()
-                await self.connect()
+        r = (await self.reader.readline()).decode('utf-8')
+        if r == '':
+            self.writer.close()
+            raise Exception(
+                f'Connection to {self.host}:{self.port} has been closed'
+            )
+        else:
+            return r.replace('\0', '').rstrip()
 
 
 class TeeworldsDiscordBridge(discord.Client):
@@ -90,7 +109,8 @@ class TeeworldsDiscordBridge(discord.Client):
         super().__init__(*args, **kwargs)
         self.config = config
         self.connections = {}
-        for server_id, discord_server in self.config['discord_servers'].items():
+        for server_id, discord_server \
+                in self.config['discord_servers'].items():
             for channel_id, settings \
                     in discord_server['teeworlds_servers'].items():
                 self.loop.create_task(
@@ -108,17 +128,37 @@ class TeeworldsDiscordBridge(discord.Client):
             settings['econ_password'],
         )
         self.connections[(server_id, channel_id)] = econ
-        await econ.connect()
-        while True:
-            line = await econ.readline()
-            match = re.match(CHAT_PATTERN, line)
-            if not match:
+        while not self.is_closed():
+            if econ.is_closing():
+                try:
+                    await econ.connect()
+                except:  # noqa: E722
+                    await sleep(5)
+                    continue
+            try:
+                line = await econ.readline()
+            except:  # noqa: E722
                 continue
-            name = match.group(1)
-            message = match.group(2)
-            await self.get_channel(channel_id).send(
-                f'[chat] {name}: {message}'
-            )
+            match = re.match(CHAT_PATTERN, line)
+            if match:
+                name = match.group(1)
+                message = match.group(2)
+                await self.get_channel(channel_id).send(
+                    f'[chat] {name}: {message}'
+                )
+                continue
+            match = re.match(JOIN_PATTERN, line)
+            if match:
+                name = match.group(1)
+                await self.get_channel(channel_id).send(
+                    f'[game] {name} joined the game'
+                )
+            match = re.match(LEAVE_PATTERN, line)
+            if match:
+                name = match.group(1)
+                await self.get_channel(channel_id).send(
+                    f'[game] {name} left the game'
+                )
 
     async def on_message(self, message):
         server_id = message.channel.guild.id
