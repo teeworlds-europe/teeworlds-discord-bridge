@@ -155,7 +155,7 @@ class TeeworldsDiscordBridge(discord.Client):
                 )
             match = re.match(LEAVE_PATTERN, line)
             if match:
-                name = match.group(1)
+                name = match.group(1).split(':')[1:]
                 await self.get_channel(channel_id).send(
                     f'[game] {name} left the game'
                 )
